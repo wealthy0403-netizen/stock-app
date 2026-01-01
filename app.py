@@ -4,12 +4,52 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+# ======================
+# 初期設定
+# ======================
 st.set_page_config(page_title="米国株 短期売買アプリ", layout="wide")
 st.title("📈 米国株 短期売買スクリーナー")
 
-# -----------------------
-# テクニカル計算
-# -----------------------
+# ======================
+# セクター日本語マップ
+# ======================
+SECTOR_JP = {
+    "Technology": "情報技術",
+    "Consumer Cyclical": "一般消費財",
+    "Consumer Defensive": "生活必需品",
+    "Healthcare": "ヘルスケア",
+    "Financial Services": "金融",
+    "Communication Services": "通信サービス",
+    "Industrials": "資本財",
+    "Energy": "エネルギー",
+    "Utilities": "公益事業",
+    "Real Estate": "不動産",
+    "Basic Materials": "素材"
+}
+
+# ======================
+# 対象銘柄（拡張版）
+# ======================
+TICKERS = [
+    "AAPL","MSFT","GOOGL","AMZN","META",
+    "NVDA","AMD","INTC","TSM","ASML",
+    "TSLA","NFLX","ADBE","CRM","ORCL",
+    "PYPL","SQ","COIN","SOFI",
+    "SHOP","UBER","ABNB","DASH",
+    "PLTR","SNOW","RBLX"
+]
+
+# ======================
+# 関数群
+# ======================
+def get_sector_jp(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+        sector = info.get("sector", "Unknown")
+        return SECTOR_JP.get(sector, sector)
+    except:
+        return "不明"
+
 def calc_indicators(df):
     df["SMA5"] = df["Close"].rolling(5).mean()
     df["SMA20"] = df["Close"].rolling(20).mean()
@@ -17,94 +57,75 @@ def calc_indicators(df):
     delta = df["Close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    rs = gain.rolling(9).mean() / loss.rolling(9).mean()
+    rs = gain.rolling(14).mean() / loss.rolling(14).mean()
     df["RSI"] = 100 - (100 / (1 + rs))
 
-    ema12 = df["Close"].ewm(span=12).mean()
-    ema26 = df["Close"].ewm(span=26).mean()
-    df["MACD"] = ema12 - ema26
-    df["Signal"] = df["MACD"].ewm(span=9).mean()
+    df["Volume_MA5"] = df["Volume"].rolling(5).mean()
+    df["Volume_MA20"] = df["Volume"].rolling(20).mean()
 
+    df["Return_5d"] = df["Close"].pct_change(5) * 100
     return df
 
-# -----------------------
-# チャート描画
-# -----------------------
+def score_stock(df):
+    score = 0
+    if df["SMA5"].iloc[-1] > df["SMA20"].iloc[-1]:
+        score += 2
+    if 40 <= df["RSI"].iloc[-1] <= 60:
+        score += 2
+    if df["Volume_MA5"].iloc[-1] > df["Volume_MA20"].iloc[-1]:
+        score += 1
+    if -5 <= df["Return_5d"].iloc[-1] <= 5:
+        score += 1
+    return score
+
 def plot_chart(df, ticker):
-    fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
-
-    axes[0].plot(df.index, df["Close"], label="株価")
-    axes[0].plot(df.index, df["SMA5"], label="SMA5")
-    axes[0].plot(df.index, df["SMA20"], label="SMA20")
-    axes[0].set_title(f"{ticker} 株価")
-    axes[0].legend()
-
-    axes[1].plot(df.index, df["RSI"], label="RSI")
-    axes[1].axhline(40, linestyle="--")
-    axes[1].axhline(60, linestyle="--")
-    axes[1].set_title("RSI")
-    axes[1].legend()
-
-    axes[2].plot(df.index, df["MACD"], label="MACD")
-    axes[2].plot(df.index, df["Signal"], label="Signal")
-    axes[2].axhline(0, linestyle="--")
-    axes[2].set_title("MACD")
-    axes[2].legend()
-
-    plt.tight_layout()
+    fig, ax = plt.subplots(figsize=(10,4))
+    ax.plot(df.index, df["Close"], label="終値")
+    ax.plot(df.index, df["SMA5"], label="SMA5")
+    ax.plot(df.index, df["SMA20"], label="SMA20")
+    ax.set_title(ticker)
+    ax.legend()
     return fig
 
-# -----------------------
-# 分析実行
-# -----------------------
+# ======================
+# メイン処理
+# ======================
 if st.button("🔍 分析開始"):
-    tickers = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "JPM", "V", "KO"]
     results = []
 
     with st.spinner("分析中..."):
-        for t in tickers:
-            df = yf.Ticker(t).history(period="6mo")
-            if len(df) < 30:
+        for ticker in TICKERS:
+            df = yf.download(ticker, period="3mo", progress=False)
+            if df.empty or len(df) < 30:
                 continue
 
             df = calc_indicators(df)
+            score = score_stock(df)
 
-            buy_score = 0
-            sell_score = 0
+            if score >= 3:
+                results.append({
+                    "銘柄": ticker,
+                    "セクター": get_sector_jp(ticker),
+                    "スコア": score,
+                    "RSI": round(df["RSI"].iloc[-1], 1),
+                    "5日騰落率(%)": round(df["Return_5d"].iloc[-1], 1)
+                })
 
-            if df["RSI"].iloc[-1] < 40:
-                buy_score += 1
-            if df["RSI"].iloc[-1] > 60:
-                sell_score += 1
-            if df["MACD"].iloc[-1] > df["Signal"].iloc[-1]:
-                buy_score += 1
-            if df["MACD"].iloc[-1] < df["Signal"].iloc[-1]:
-                sell_score += 1
-            if df["SMA5"].iloc[-1] > df["SMA20"].iloc[-1]:
-                buy_score += 1
-            if df["SMA5"].iloc[-1] < df["SMA20"].iloc[-1]:
-                sell_score += 1
+    ranking = pd.DataFrame(results).sort_values("スコア", ascending=False)
 
-            results.append({
-                "ティッカー": t,
-                "終値": round(df["Close"].iloc[-1], 2),
-                "買いスコア": buy_score,
-                "売りスコア": sell_score
-            })
+    st.subheader("📊 短期売買ランキング（スコア順）")
+    st.dataframe(ranking, use_container_width=True)
 
-    result_df = pd.DataFrame(results)
+    # ======================
+    # 上位銘柄チャート
+    # ======================
+    top_n = st.slider("📈 チャート表示する上位銘柄数", 1, 5, 3)
+    top_stocks = ranking.head(top_n)
 
-    st.subheader("🟢 買い候補")
-    st.dataframe(result_df.sort_values("買いスコア", ascending=False))
+    st.subheader("📈 上位銘柄チャート")
 
-    st.subheader("🔴 売り候補")
-    st.dataframe(result_df.sort_values("売りスコア", ascending=False))
-
-    st.subheader("📊 チャート表示")
-    selected = st.selectbox("銘柄を選択", result_df["ティッカー"])
-
-    chart_df = yf.Ticker(selected).history(period="6mo")
-    chart_df = calc_indicators(chart_df)
-
-    fig = plot_chart(chart_df, selected)
-    st.pyplot(fig)
+    for ticker in top_stocks["銘柄"]:
+        df = yf.download(ticker, period="3mo", progress=False)
+        df = calc_indicators(df)
+        fig = plot_chart(df, ticker)
+        st.pyplot(fig)
