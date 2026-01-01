@@ -1,17 +1,20 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
 
 # ======================
 # 初期設定
 # ======================
-st.set_page_config(page_title="米国株 短期売買アプリ", layout="wide")
-st.title("📈 米国株 短期売買スクリーナー")
+st.set_page_config(page_title="米国株 短期売買（リバウンド特化）", layout="wide")
+st.title("📉 米国株 短期売買スクリーナー（A：リバウンド特化）")
+
+# セッション保存
+if "ranking" not in st.session_state:
+    st.session_state.ranking = None
 
 # ======================
-# セクター日本語マップ
+# セクター日本語
 # ======================
 SECTOR_JP = {
     "Technology": "情報技術",
@@ -28,24 +31,23 @@ SECTOR_JP = {
 }
 
 # ======================
-# 対象銘柄（拡張版）
+# 対象銘柄（値動き重視）
 # ======================
 TICKERS = [
-    "AAPL","MSFT","GOOGL","AMZN","META",
-    "NVDA","AMD","INTC","TSM","ASML",
-    "TSLA","NFLX","ADBE","CRM","ORCL",
-    "PYPL","SQ","COIN","SOFI",
+    "PLTR","SOFI","COIN","RBLX","SNOW",
     "SHOP","UBER","ABNB","DASH",
-    "PLTR","SNOW","RBLX"
+    "AMD","NVDA","INTC","TSM",
+    "TSLA","LCID","RIVN",
+    "PYPL","SQ",
+    "META","NFLX"
 ]
 
 # ======================
-# 関数群
+# 関数
 # ======================
 def get_sector_jp(ticker):
     try:
-        info = yf.Ticker(ticker).info
-        sector = info.get("sector", "Unknown")
+        sector = yf.Ticker(ticker).info.get("sector", "Unknown")
         return SECTOR_JP.get(sector, sector)
     except:
         return "不明"
@@ -66,29 +68,44 @@ def calc_indicators(df):
     df["Return_5d"] = df["Close"].pct_change(5) * 100
     return df
 
+# --- A：リバウンド特化スコア ---
 def score_stock(df):
     score = 0
-    if df["SMA5"].iloc[-1] > df["SMA20"].iloc[-1]:
+    rsi = df["RSI"].iloc[-1]
+    ret5 = df["Return_5d"].iloc[-1]
+
+    if rsi < 25:
+        score += 5
+    elif 25 <= rsi < 35:
+        score += 4
+    elif 35 <= rsi < 45:
         score += 2
-    if 40 <= df["RSI"].iloc[-1] <= 60:
+
+    if ret5 <= -8:
+        score += 3
+    elif -8 < ret5 <= -4:
         score += 2
+    elif -4 < ret5 <= -2:
+        score += 1
+
     if df["Volume_MA5"].iloc[-1] > df["Volume_MA20"].iloc[-1]:
+        score += 2
+
+    if df["SMA20"].iloc[-1] >= df["SMA20"].iloc[-3]:
         score += 1
-    if -5 <= df["Return_5d"].iloc[-1] <= 5:
-        score += 1
+
     return score
 
-def plot_chart(df, ticker):
-    fig, ax = plt.subplots(figsize=(10,4))
-    ax.plot(df.index, df["Close"], label="終値")
-    ax.plot(df.index, df["SMA5"], label="SMA5")
-    ax.plot(df.index, df["SMA20"], label="SMA20")
-    ax.set_title(ticker)
-    ax.legend()
-    return fig
+def score_to_color(score):
+    if score >= 9:
+        return "darkgreen"
+    elif score >= 6:
+        return "green"
+    else:
+        return "gray"
 
 # ======================
-# メイン処理
+# 分析ボタン
 # ======================
 if st.button("🔍 分析開始"):
     results = []
@@ -102,7 +119,7 @@ if st.button("🔍 分析開始"):
             df = calc_indicators(df)
             score = score_stock(df)
 
-            if score >= 3:
+            if score >= 4:
                 results.append({
                     "銘柄": ticker,
                     "セクター": get_sector_jp(ticker),
@@ -111,21 +128,63 @@ if st.button("🔍 分析開始"):
                     "5日騰落率(%)": round(df["Return_5d"].iloc[-1], 1)
                 })
 
-    ranking = pd.DataFrame(results).sort_values("スコア", ascending=False)
+    st.session_state.ranking = (
+        pd.DataFrame(results)
+        .sort_values("スコア", ascending=False)
+    )
 
-    st.subheader("📊 短期売買ランキング（スコア順）")
+# ======================
+# 表示
+# ======================
+if st.session_state.ranking is not None and not st.session_state.ranking.empty:
+    ranking = st.session_state.ranking
+
+    st.subheader("📊 リバウンド候補ランキング")
     st.dataframe(ranking, use_container_width=True)
 
-    # ======================
-    # 上位銘柄チャート
-    # ======================
-    top_n = st.slider("📈 チャート表示する上位銘柄数", 1, 5, 3)
-    top_stocks = ranking.head(top_n)
+    selected = st.selectbox("📌 銘柄を選択", ranking["銘柄"])
 
-    st.subheader("📈 上位銘柄チャート")
+    current_score = ranking.loc[
+        ranking["銘柄"] == selected, "スコア"
+    ].values[0]
 
-    for ticker in top_stocks["銘柄"]:
-        df = yf.download(ticker, period="3mo", progress=False)
-        df = calc_indicators(df)
-        fig = plot_chart(df, ticker)
-        st.pyplot(fig)
+    df = yf.download(selected, period="3mo", progress=False)
+    df = calc_indicators(df)
+
+    # 利確・損切り
+    entry = df["Close"].iloc[-1]
+    take_profit = entry * 1.05
+    stop_loss = entry * 0.95
+
+    color = score_to_color(current_score)
+
+    # ===== チャート =====
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(10,6), sharex=True,
+        gridspec_kw={"height_ratios": [3,1]}
+    )
+
+    ax1.plot(df["Close"], color=color, linewidth=2,
+             label=f"終値（スコア {current_score}）")
+    ax1.plot(df["SMA5"], label="SMA5")
+    ax1.plot(df["SMA20"], label="SMA20")
+    ax1.axhline(entry, linestyle="--", label="エントリー")
+    ax1.axhline(take_profit, linestyle="--", label="利確 +5%")
+    ax1.axhline(stop_loss, linestyle="--", label="損切り -5%")
+    ax1.legend()
+
+    ax2.plot(df["RSI"], label="RSI")
+    ax2.axhline(70, linestyle="--")
+    ax2.axhline(30, linestyle="--")
+    ax2.set_ylim(0,100)
+    ax2.legend()
+
+    st.pyplot(fig)
+
+    if current_score >= 7:
+        st.success("🟢 リバウンド有力候補")
+    else:
+        st.info("⚪ 様子見")
+
+else:
+    st.info("🔍『分析開始』を押してください")
